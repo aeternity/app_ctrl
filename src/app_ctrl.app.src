@@ -1,0 +1,20 @@
+%%% -*- mode: erlang; erlang-indent-level: 4; indent-tabs-mode: nil -*-
+%%%-------------------------------------------------------------------
+%%% @copyright (C) 2018, Aeternity Anstalt
+%%%-------------------------------------------------------------------
+{application, app_ctrl,
+ [{description, "An OTP application"},
+  {vsn, "0.1.0"},
+  {registered, []},
+  {mod, { app_ctrl_app, []}},
+  {applications,
+   [kernel,
+    stdlib
+   ]},
+  {env,[]},
+  {modules, []},
+
+  {maintainers, []},
+  {licenses, ["Apache 2.0"]},
+  {links, []}
+ ]}.
