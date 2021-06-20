@@ -14,7 +14,7 @@
   {env,[]},
   {modules, []},
 
-  {maintainers, []},
-  {licenses, ["Apache 2.0"]},
+  {maintainers, ["Ulf Wiger"]},
+  {licenses, ["ISC"]},
   {links, []}
  ]}.

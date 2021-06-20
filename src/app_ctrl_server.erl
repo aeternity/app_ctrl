@@ -6,10 +6,13 @@
 
 -behaviour(gen_server).
 
--export([start_link/0]).
+-export([ start/0
+        , start_link/0]).
 -export([running/2,
          stopped/2,
          check_dependencies/1]).
+
+-export([whereis/0]).
 
 -export([init/1,
          handle_call/3,
@@ -21,8 +24,16 @@
 -record(st, {controllers = []}).
 -define(TAB, ?MODULE).
 
+%% This is used when the server is bootstrapped from the logger handler,
+%% since the handler is initialized from a temporary process.
+start() ->
+    gen_server:start({local, ?MODULE}, ?MODULE, [], []).
+
 start_link() ->
     gen_server:start_link({local, ?MODULE}, ?MODULE, [], []).
+
+whereis() ->
+    whereis(?MODULE).
 
 running(App, Node) ->
     gen_server:cast(?MODULE, {app_running, App, Node}).
