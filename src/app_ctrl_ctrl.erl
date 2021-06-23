@@ -5,7 +5,7 @@
 
 -behaviour(gen_server).
 
--export([start_link/2]).
+-export([start_link/1]).
 
 -export([init/1,
          handle_call/3,
@@ -14,23 +14,26 @@
          terminate/2,
          code_change/3]).
 
--record(st, {app,
-             start_requested = false,
-             start_reply_sent = false,
-             running = false,
-             loaded  = false,
-             deps}).
+-include_lib("kernel/include/logger.hrl").
+
+-record(st, { app
+            , start_requested  = false :: boolean()
+            , start_reply_sent = false :: boolean()
+            , should_run       = false :: boolean()
+            , running          = false :: boolean()
+            , loaded           = false :: boolean()
+            }).
 
 -define(AC, application_controller).
 
-start_link(App, Deps) ->
-    gen_server:start_link(?MODULE, {App, Deps}, []).
+start_link(App) ->
+    gen_server:start_link(?MODULE, App, []).
 
-init({App, Deps}) ->
+init(App) ->
+    ?LOG_DEBUG("init(~p)", [App]),
     case application_controller:control_application(App) of
         true ->
-            {ok, #st{app = App,
-                     deps = Deps}};
+            {ok, #st{app = App}};
         false ->
             {error, {could_not_control, App}}
     end.
@@ -39,22 +42,14 @@ handle_call(_Req, _From, St) ->
     {reply, {error, unknown_call}, St}.
 
 handle_cast({app_running, App, _Node}, #st{app = MyApp} = St) ->
-    case App =/= MyApp
-        andalso St#st.running           =:= false
-        andalso St#st.start_requested   =:= true
-        andalso ok_to_start(St) of
+    case App =/= MyApp of
         true ->
-            case St#st.start_reply_sent of
-                false ->
-                    ?AC ! {ac_start_application_reply, MyApp, start_it},
-                    {noreply, St#st{start_reply_sent = true}};
-                true ->
-                    ?AC ! {ac_change_application_req, MyApp, start_it},
-                    {noreply, St}
-            end;
+            {noreply, check_app(St)};
         false ->
             {noreply, St}
     end;
+handle_cast({new_mode, _Mode, _Node}, #st{} = St) ->
+    {noreply, check_app(St)};
 handle_cast(_Msg, St) ->
     {noreply, St}.
 
@@ -65,20 +60,25 @@ handle_info({ac_load_application_req, App}, #st{app = MyApp} = St) ->
                    end,
     ?AC ! {ac_application_load_reply, App, Reply},
     {noreply, St1};
-handle_info({ac_start_application_req, App}, #st{app = MyApp} = St) ->
+handle_info({ac_start_application_req, App} = Msg, #st{app = MyApp} = St0) ->
+    ?LOG_DEBUG("start_application_req: ~p", [App]),
+    St = St0#st{start_requested = true},
     case App =:= MyApp of
         true ->
-            case ok_to_start(St) of
+            case ok_to_start(MyApp) of
                 true ->
-                    ?AC ! {ac_start_application_reply, App, start_it},
-                    {noreply, St#st{start_requested = true,
-                                    start_reply_sent = true}};
+                    ?LOG_DEBUG("will start ~p", [MyApp]),
+                    {noreply, maybe_tell_ac(run, St)};
                 false ->
-                    {noreply, St#st{start_requested = true,
-                                    start_reply_sent = false}}
+                    ?LOG_DEBUG("WON'T start ~p", [MyApp]),
+                    {noreply, maybe_tell_ac(dont_run, St)}
             end;
         false ->
-            ?AC ! {ac_start_application_reply, App, {error, wrong_app}},
+            %% Don't use the standard reply helpers, as they note our
+            %% own reply state. BTW, this state should never occur unless
+            %% something is badly wrong or we're being messed with.
+            logger:error("Sent to wrong app controller: ~p", [Msg]),
+            send_to_ac({ac_start_application_reply, App, {error, wrong_app}}),
             {noreply, St}
     end;
 handle_info({ac_application_run, App, Res}, #st{app = App} = St) ->
@@ -109,5 +109,62 @@ terminate(_Reason, _St) ->
 code_change(_FromVsn, St, _Extra) ->
     {ok, St}.
 
-ok_to_start(#st{deps = #{deps := Deps}}) ->
-    app_ctrl_server:check_dependencies(Deps).
+ok_to_start(App) ->
+    ?LOG_DEBUG("ok_to_start(~p)", [App]),
+    %% Res = app_ctrl_server:check_dependencies(Deps),
+    Res = app_ctrl_server:ok_to_start(App),
+    ?LOG_DEBUG("ok_to_start(~p) -> ~p", [App, Res]),
+    Res == true.
+
+ok_to_stop(App) ->
+    ?LOG_DEBUG("ok_to_stop(~p)", [App]),
+    Res = app_ctrl_server:ok_to_stop(App),
+    ?LOG_DEBUG("ok_to_stop(App = ~p) -> ~p", [App, Res]),
+    Res == true.
+
+check_app(#st{start_requested = false} = St) ->
+    %% Cannot do anything until we get a start request.
+    St;
+check_app(#st{app = A} = St) ->
+    ShouldRun = app_ctrl_server:should_i_run(A),
+    app_should_run(ShouldRun, St).
+            
+
+app_should_run(Bool, #st{running = Bool} = St) ->
+    St;
+app_should_run(false, #st{app = MyApp, running = true} = St) ->
+    St1 = case ok_to_stop(MyApp) of
+              true ->
+                  maybe_tell_ac(dont_run, St);
+              false ->
+                  St
+          end,
+    St1#st{should_run = false};
+app_should_run(true, #st{app = MyApp, running = false} = St) ->
+    St1 = case ok_to_start(MyApp) of
+              true ->
+                  maybe_tell_ac(run, St);
+              false ->
+                  St
+          end,
+    St1#st{should_run = true}.
+
+maybe_tell_ac(run     , St) -> tell_ac_(start_it, start_it, St);
+maybe_tell_ac(dont_run, St) -> tell_ac_(not_started, stop_it, St).
+
+tell_ac_(_Reply, Change, #st{start_reply_sent = true} = St) ->
+    ac_change_req(Change, St),
+    St;
+tell_ac_(Reply, _Change, St) ->
+    ac_start_reply(Reply, St),
+    St#st{start_reply_sent = true}.
+
+ac_start_reply(Reply, #st{app = App}) ->
+    send_to_ac({ac_start_application_reply, App, Reply}).
+
+ac_change_req(Req, #st{app = App}) ->
+    send_to_ac({ac_change_application_req, App, Req}).
+
+send_to_ac(Msg) ->
+    ?LOG_DEBUG("AC ! ~p", [Msg]),
+    ?AC ! Msg.

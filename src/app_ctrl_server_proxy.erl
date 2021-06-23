@@ -33,7 +33,7 @@ init([]) ->
     end.
 
 handle_call(_Req, _From, St) ->
-    {error, unknown_call, St}.
+    {reply, {error, unknown_call}, St}.
 
 handle_cast(_Msg, St) ->
     {noreply, St}.

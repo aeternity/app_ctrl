@@ -9,18 +9,19 @@
         , removing_handler/1
         ]).
 
+-include_lib("kernel/include/logger.hrl").
+
 %%% ======================================================================
 %%% Logger callbacks
 
 %%% Handler being added
--spec adding_handler(Config) -> {ok,Config} | {error,Reason} when
+-spec adding_handler(Config) -> {ok,map()} | {error,Reason} when
       Config :: logger:handler_config(),
       Reason :: term().
 adding_handler(Config) ->
-    io:fwrite("adding_handler(~p)~n", [Config]),
-    io:fwrite("Loaded = ~p~n", [application:loaded_applications()]),
-    Pid = spawn_dac(),
-    {ok, Config#{ulf => rules, dac => Pid}}.
+    ?LOG_DEBUG("adding_handler(~p)", [Config]),
+    Pid = spawn_app_ctrl(),
+    {ok, Config#{app_ctrl_server => Pid}}.
 
 %%% Updating handler config
 -spec changing_config(SetOrUpdate, OldConfig, NewConfig) ->
@@ -55,37 +56,7 @@ removing_handler(_Config) ->
 %%% End logger callbacks
 %%% ======================================================================
 
-spawn_dac() ->
+spawn_app_ctrl() ->
     {ok, Pid} = app_ctrl_server:start(),
+    ?LOG_DEBUG("Dac pid: ~p", [Pid]),
     Pid.
-%%     Me = self(),
-%%     {Pid, MRef} = spawn_monitor(
-%%                     fun() ->
-%%                             init_dac(Me)
-%%                     end),
-%%     receive
-%%         {Pid, ok} ->
-%%             demonitor(MRef),
-%%             Pid;
-%%         {'DOWN', MRef, _, _, Reason} ->
-%%             error(Reason)
-%%     end.
-
-%% init_dac(Parent) ->
-%%     io:fwrite("DAC here!!! AC = ~p~n", [whereis(application_controller)]),
-%%     LoadRes = application:load(app_ctrl),
-%%     io:fwrite("LoadRes = ~p~n", [LoadRes]),
-%%     CtrlApps = application:get_env(app_ctrl, apps, []),
-%%     io:fwrite("CtrlApps = ~p~n", [CtrlApps]),
-%%     CtrlRes = [{A, application_controller:control_application(A)} || A <- CtrlApps],
-%%     io:fwrite("CtrlRes = ~p~n", [CtrlRes]),
-%%     register(dist_ac, self()),
-%%     Parent ! {self(), ok},
-%%     dac_loop().
-
-%% dac_loop() ->
-%%     receive
-%%         Msg ->
-%%             io:fwrite("dac: ~p~n", [Msg])
-%%     end,
-%%     dac_loop().
