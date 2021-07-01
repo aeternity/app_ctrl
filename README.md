@@ -105,13 +105,13 @@ in the OTP application controller, but can be useful e.g. in order to ensure
 that a preparatory application gets to run before some third-party app whose
 `applications` dependencies can't easily be changed.
 
-%%%% `roles`
+#### `roles`
 
 The `{roles, [app_name()]}` list allows for grouping of applications into more
 manageable categories. This is to make a distributed layout (not yet supported)
 more readable.
 
-%%%% `modes`
+#### `modes`
 
 The `{modes, [{mode_name(), [role()]}]}` list allows for specification of
 different processor modes, where different sets of `roles` are applied.
