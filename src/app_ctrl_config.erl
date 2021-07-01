@@ -21,7 +21,11 @@
 adding_handler(Config) ->
     ?LOG_DEBUG("adding_handler(~p)", [Config]),
     Pid = spawn_app_ctrl(),
-    {ok, Config#{app_ctrl_server => Pid}}.
+    Config1 = Config#{ filters => []
+                     , level => none
+                     , filter_default => stop
+                     , app_ctrl_server => Pid },
+    {ok, Config1}.
 
 %%% Updating handler config
 -spec changing_config(SetOrUpdate, OldConfig, NewConfig) ->

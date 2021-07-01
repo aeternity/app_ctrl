@@ -68,12 +68,32 @@ plugin, but currently, all configuration needs to be done manually.
 ```erlang
 {kernel, [
    {logger, [
-      {handler, app_ctrl, app_ctrl_config,
-         #{filters => [], filter_default => stop}}
+      {handler, app_ctrl, app_ctrl_config, #{}}
     ]}
  ]}
 ```
 Also, the `app_ctrl` application must be installed and started.
+
+Note that any log level or filter settings for the above `app_ctrl`
+handler will be overwritten by the handler itself.
+It is not intended for reacting to log messages.
+
+Inspecting the logger handler via `logger:i()` will reveal something like this:
+
+```
+    Id: app_ctrl
+        Module: app_ctrl_config
+        Level:  none
+        Formatter:
+            Module: logger_formatter
+            Config:
+                []
+        Filter Default: stop
+        Filters:
+            (none)
+        Custom Config:
+            app_ctrl_server: <0.1959.0>
+```
 
 ### Configuration details
 

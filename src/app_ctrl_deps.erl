@@ -1,7 +1,29 @@
 %%% -*- mode: erlang; erlang-indent-level: 4; indent-tabs-mode: nil -*-
 %%%-------------------------------------------------------------------
-%%% @copyright (C) 2018, Aeternity Anstalt
+%%% @copyright (C) 2018-21, Aeternity Anstalt
 %%%-------------------------------------------------------------------
+
+%%% Dependency management
+%%% Note: The idea is to evolve `app_ctrl` into a cluster controller.
+%%% Some design decisions are driven by this, and may look out of place
+%%% as long as only local application control is supported.
+%%%
+%%% Such a thing is the wrapping of application identifiers as
+%%% `{app_name(), node()}` tuples. In some interactions with the local
+%%% application_controller, it is vital to know whether to report a
+%%% remote application as running: If an instance of the application in
+%%% question is supposed to be running locally, we must NOT report the
+%%% event, since it would cause the application_controller to automatically
+%%% stop the local instance. The assumption of the application_controller
+%%% is that a dist_ac-controlled application runs in one place only, but
+%%% `app_ctrl` allows for other configurations, such as multiple mated
+%%% pairs, load-sharing pools, etc.
+%%%
+%%% This module also builds a digraph of all detected app dependencies.
+%%% This is currently overkill, but the code is kept, as it may become
+%%% handy later on, perhaps partly in an introspection API, where app
+%%% dependencies can be conventiently explored.
+%%%
 -module(app_ctrl_deps).
 
 -export([dependencies/0,
@@ -11,16 +33,18 @@
          apps_in_mode/1
         ]).
 
--ifdef(TEST).
--include_lib("eunit/include/eunit.hrl").
--endif.
+-export([get_dependencies_of_app/2]).
+
+%% -ifdef(TEST).
+%% -include_lib("eunit/include/eunit.hrl").
+%% -endif.
 -include_lib("kernel/include/logger.hrl").
 
 dependencies() ->
     CtrlApps = ctrl_apps(),
     ensure_all_loaded(CtrlApps),
-    %% CtrlApps1 = add_app_deps(app_deps(), CtrlApps),
-    dependencies(CtrlApps).
+    CtrlApps1 = add_app_deps(app_deps(), CtrlApps),
+    dependencies(CtrlApps1).
 
 dependencies(CtrlApps) ->
     G = digraph:new(),
@@ -33,6 +57,10 @@ dependencies(CtrlApps) ->
             || V <- vertices(G)],
     #{ graph => G
      , annotated =>  annotate(add_final_deps(Deps, CtrlApps), G) }.
+
+role_apps() ->
+    Roles = application:get_env(app_ctrl, roles, []),
+    apps_of_roles(Roles).
 
 valid_mode(Mode) ->
     lists:keymember(Mode, 1, application:get_env(app_ctrl, modes, [])).
@@ -51,6 +79,10 @@ apps_in_mode(Mode) ->
             error({unknown_mode, Mode})
     end.
 
+get_dependencies_of_app(Graph, App) when is_atom(App) ->
+    [A || {_,{A,_},_,_} <- [digraph:edge(Graph, E)
+                            || E <- digraph:in_edges(Graph, {App,node()})]].
+
 %% We want to figure out which apps to control. Basically these are
 %% all the apps mentioned in 'applications' and 'roles'.
 ctrl_apps() ->
@@ -64,10 +96,6 @@ ctrl_apps_(L) ->
           ({A, Ps}) when is_list(Ps) ->
               {app_vertex(A), normalize_vertices(maps:from_list(Ps))}
       end, RoleApps ++ L).
-
-role_apps() ->
-    Roles = application:get_env(app_ctrl, roles, []),
-    apps_of_roles(Roles).
 
 apps_of_roles(Roles) ->
     remove_duplicates(
@@ -88,6 +116,9 @@ normalize_vertices_(K, M) ->
         error ->
             M
     end.
+
+add_app_deps(ADeps, CtrlApps) ->
+    add_deps(start_after, ADeps, CtrlApps).
 
 add_final_deps(Deps, CtrlApps) ->
     add_deps(deps, Deps, CtrlApps).
@@ -150,6 +181,15 @@ union(A0, B0) ->
     B = lists:usort(B0),
     (A -- B) ++ (B -- A).
 
+app_deps() ->
+    [{app_vertex(A),
+      [app_vertex(D) || D <- ok(application:get_key(A, applications))]}
+     || {A, _, _} <- application:loaded_applications()].
+
+ok({ok, Res}) ->
+    Res;
+ok(Other) ->
+    erlang:error({unexpected, Other}).
 
 add_vertices(L, G) ->
     lists:foreach(

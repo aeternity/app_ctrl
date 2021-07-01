@@ -35,6 +35,8 @@
             , graph}).
 -define(TAB, ?MODULE).
 
+-include_lib("kernel/include/logger.hrl").
+
 %% This is used when the server is bootstrapped from the logger handler,
 %% since the handler is initialized from a temporary process.
 start() ->
@@ -76,16 +78,33 @@ init([]) ->
                       || {A, _, _} <- application:which_applications()]),
     #{graph := G, annotated := Deps} = app_ctrl_deps:dependencies(),
     RoleApps = app_ctrl_deps:role_apps(),   %% all apps controlled via roles
-    Controllers = start_controllers(Deps),
-    OtherApps = [A || {A,_} <- Controllers, not lists:member(A, RoleApps)],
-    Mode = application:get_env(app_ctrl, default_mode, undefined),
-    {ok, set_current_mode(
-           Mode,
-           #st{ controllers = Controllers
-              , role_apps = RoleApps
-              , other_apps = OtherApps
-              , graph = G})}.
+    RoleAppDeps = deps_of_apps(RoleApps, G),
+    case [A || A <- RoleAppDeps,
+               not lists:member(A, RoleApps)] of
+        [] ->
+            Controllers = start_controllers(Deps),
+            OtherApps = [A || {A,_} <- Controllers, not lists:member(A, RoleApps)],
+            Mode = application:get_env(app_ctrl, default_mode, undefined),
+            {ok, set_current_mode(
+                   Mode,
+                   #st{ controllers = Controllers
+                      , role_apps = RoleApps
+                      , other_apps = OtherApps
+                      , graph = G})};
+        Orphans ->
+            ?LOG_ERROR("Dependent apps not found in roles: ~p", [Orphans]),
+            error({orphans, Orphans})
+    end.
 
+deps_of_apps(As, G) ->
+    lists:foldl(
+      fun(A, Acc) ->
+              lists:foldl(fun ordsets:add_element/2, Acc,
+                          app_ctrl_deps:get_dependencies_of_app(G, A))
+      end, ordsets:new(), As).
+
+intersection(A, B) ->
+    A -- (A -- B).
 
 handle_call({check, Deps}, _From, #st{} = St) ->
     {reply, check_(Deps), St};
