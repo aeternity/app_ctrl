@@ -33,7 +33,8 @@
          apps_in_mode/1
         ]).
 
--export([get_dependencies_of_app/2]).
+-export([get_dependencies_of_app/2,
+         get_app_dependencies/2]).
 
 %% -ifdef(TEST).
 %% -include_lib("eunit/include/eunit.hrl").
@@ -59,18 +60,18 @@ dependencies(CtrlApps) ->
      , annotated =>  annotate(add_final_deps(Deps, CtrlApps), G) }.
 
 role_apps() ->
-    Roles = application:get_env(app_ctrl, roles, []),
+    Roles = app_ctrl_config:roles(),
     apps_of_roles(Roles).
 
 valid_mode(Mode) ->
-    lists:keymember(Mode, 1, application:get_env(app_ctrl, modes, [])).
+    lists:keymember(Mode, 1, app_ctrl_config:modes()).
 
 apps_in_mode(Mode) ->
-    Modes = application:get_env(app_ctrl, modes, []),
+    Modes = app_ctrl_config:modes(),
     ?LOG_DEBUG("Modes = ~p", [Modes]),
     case lists:keyfind(Mode, 1, Modes) of
         {_, Roles} ->
-            RolesEnv = application:get_env(app_ctrl, roles, []),
+            RolesEnv = app_ctrl_config:roles(),
             RoleInfo = [RI || {R, _} = RI <- RolesEnv,
                               lists:member(R, Roles)],
             apps_of_roles(RoleInfo);
@@ -83,10 +84,14 @@ get_dependencies_of_app(Graph, App) when is_atom(App) ->
     [A || {_,{A,_},_,_} <- [digraph:edge(Graph, E)
                             || E <- digraph:in_edges(Graph, {App,node()})]].
 
+get_app_dependencies(Graph, App) when is_atom(App) ->
+    [A || {_,_,{A,_},_} <- [digraph:edge(Graph, E)
+                            || E <- digraph:out_edges(Graph, {App,node()})]].
+
 %% We want to figure out which apps to control. Basically these are
 %% all the apps mentioned in 'applications' and 'roles'.
 ctrl_apps() ->
-    ctrl_apps_(application:get_env(app_ctrl, applications, [])).
+    ctrl_apps_(app_ctrl_config:applications()).
 
 ctrl_apps_(L) ->
     RoleApps = [{A, #{}} || A <- role_apps()],

@@ -68,7 +68,7 @@ plugin, but currently, all configuration needs to be done manually.
 ```erlang
 {kernel, [
    {logger, [
-      {handler, app_ctrl, app_ctrl_config, #{}}
+      {handler, app_ctrl, app_ctrl_bootstrap, #{}}
     ]}
  ]}
 ```
@@ -97,6 +97,12 @@ Inspecting the logger handler via `logger:i()` will reveal something like this:
 
 ### Configuration details
 
+The `app_ctrl` configuration can either be defined in the `app_ctrl` app
+environment (usually via `sys.config`), or in each application's local app
+environment. In the latter case, settings are given under the environment key
+`$app_ctrl`, either defining the `app_ctrl` settings in one place, or
+incrementally modifying settings under a `modify` rubric as described below.
+
 #### `applications`
 
 The `applications` list is mainly intended to allow certain applications
@@ -105,16 +111,92 @@ in the OTP application controller, but can be useful e.g. in order to ensure
 that a preparatory application gets to run before some third-party app whose
 `applications` dependencies can't easily be changed.
 
+**Example:**
+```erlang
+{applications, [
+    {setup, [{start_before, [mnesia]}]}
+ ]}
+```
+When defining the setting inside another application, the configuration is:
+
+```erlang
+{'$app_ctrl', [
+  {applications, [
+    {setup, [{start_before, [mnesia]}]}
+   ]}
+ ]}
+```
+When incrementally modifying the setting from a local environment, use:
+
+```erlang
+{'$app_ctrl', [
+  {modify, [
+    {applications, [
+      {Action, Values}
+     ]}
+ ]}
+```
+
+Where `Action` is one of:
+
+* `add` - `Values:: [{app_name(), dependency()}]`
+  Add a list application dependencies, possibly replacing entries
+  which are already in the list.
+* `del` - `Values :: [app_name()]`
+  Remove applications if they are present in the list
+
+When using the local application environment to inform `app_ctrl`
+
 #### `roles`
 
 The `{roles, [app_name()]}` list allows for grouping of applications into more
 manageable categories. This is to make a distributed layout (not yet supported)
 more readable.
 
+**Example:**
+```erlang
+{roles, [
+  {basic, [setup, gproc]}
+ ]}
+```
+
+When incrementally modifying in the local app environment, the following actions
+are supported:
+
+* `join` - the current application is added to the set
+* `leave` - the current application is removed from the set
+* `{add, [app_name()]}` add applications to the set
+* `{del, [app_name()]}` remove applications from the set
+
+**Example:**
+```erlang
+{'$app_ctrl', [
+  {modify, [
+    {roles, [
+      {basic, [join]}  % The current app joins the `basic` role
+   ]}
+ ]}
+```
+
 #### `modes`
 
 The `{modes, [{mode_name(), [role()]}]}` list allows for specification of
 different processor modes, where different sets of `roles` are applied.
+
+When incrementally modifying in the local app environment, the following
+actions are supported:
+
+**Example:**
+```erlang
+{'$app_ctrl', [
+  {modify, [
+    {modes, [
+      {development, [
+        {add, [mining_tools]}
+       ]}
+   ]}
+ ]}
+```
 
 ## Build
 

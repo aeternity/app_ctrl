@@ -9,9 +9,14 @@
   {mod, { app_ctrl_app, []}},
   {applications,
    [kernel,
-    stdlib
+    stdlib,
+    setup,
+    gproc
    ]},
-  {env,[]},
+  {env,
+   [
+     {init_apps, [kernel, stdlib, sasl, setup, gproc, app_ctrl]}
+   ]},
   {modules, []},
 
   {maintainers, ["Ulf Wiger"]},
