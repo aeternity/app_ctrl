@@ -4,9 +4,11 @@
 -export([
           roles/0
         , modes/0
+        , current_mode/0
+        , set_current_mode/1
         , default_mode/0
         , applications/0
-        , init_apps/0
+        , protected_mode_apps/0
         ]).
 
 -include_lib("kernel/include/logger.hrl").
@@ -14,6 +16,17 @@
 roles() -> get_env_set(roles).
 
 modes() -> get_env_set(modes).
+
+current_mode() ->
+    case application:get_env(app_ctrl, mode) of
+        undefined ->
+            default_mode();
+        {ok, Val} ->
+            Val
+    end.
+
+set_current_mode(Mode) ->
+    application:set_env(app_ctrl, mode, Mode).
 
 default_mode() ->
     case get_original_env(default_mode) of
@@ -26,7 +39,7 @@ default_mode() ->
 %% Format: [{App, 
 applications() -> get_env_dict(applications).
 
-init_apps() -> get_env_set(init_apps).
+protected_mode_apps() -> get_env_set(protected_mode_apps).
 
 get_env_set(Key) ->
     Orig = ordsets:from_list(get_original_env(Key)),

@@ -35,7 +35,7 @@
             , graph}).
 -define(TAB, ?MODULE).
 
--define(INIT_MODE, app_ctrl_init).  %% hard-coded app list
+-define(PROTECTED_MODE, app_ctrl_protected).  %% hard-coded app list
 
 -include_lib("kernel/include/logger.hrl").
 
@@ -57,7 +57,13 @@ stopped(App, Node) ->
     gen_server:cast(?MODULE, {app_stopped, App, Node}).
 
 set_mode(Mode) ->
-    gen_server:call(?MODULE, {set_mode, Mode}).
+    case gen_server:call(?MODULE, {set_mode, Mode}) of
+        ok ->
+            app_ctrl_config:set_current_mode(Mode),
+            ok;
+        Error ->
+            Error
+    end.
 
 check_dependencies(Deps) ->
     gen_server:call(?MODULE, {check, Deps}).
@@ -89,7 +95,7 @@ init([]) ->
             ?LOG_DEBUG("Controllers = ~p", [lists:sort(Controllers)]),
             OtherApps = [A || {A,_} <- Controllers, not lists:member(A, RoleApps)],
             {ok, set_current_mode(
-                   ?INIT_MODE,
+                   ?PROTECTED_MODE,
                    #st{ controllers = Controllers
                       , role_apps = RoleApps
                       , other_apps = OtherApps
@@ -157,7 +163,7 @@ handle_cast({app_running, App, Node}, #st{mode = Mode} = St) ->
     ets:insert(?TAB, {{App,Node}}),
     tell_controllers(app_running, App, Node, St),
     case {Mode, App} of
-        {?INIT_MODE, app_ctrl} ->
+        {?PROTECTED_MODE, app_ctrl} ->
             ?LOG_DEBUG("Moving to default mode", []),
             {noreply, set_default_mode(St)};
         _ ->
@@ -245,8 +251,8 @@ set_default_mode(St) ->
     tell_controllers(new_mode, Mode, node(), St1),
     St1.
 
-set_current_mode(?INIT_MODE, #st{controllers = Cs} = St) ->
-    St#st{mode = ?INIT_MODE, allowed_apps = any_active(init_apps(St), Cs)};
+set_current_mode(?PROTECTED_MODE, #st{controllers = Cs} = St) ->
+    St#st{mode = ?PROTECTED_MODE, allowed_apps = any_active(protected_mode_apps(St), Cs)};
 set_current_mode(Mode, #st{other_apps = Other} = St) ->
     Allowed = allowed_apps(Mode, St),
     St#st{mode = Mode, allowed_apps = Allowed ++ Other}.
@@ -254,9 +260,9 @@ set_current_mode(Mode, #st{other_apps = Other} = St) ->
 any_active(As, Cs) ->
     intersection(As, [A || {A, _} <- Cs]).
 
-init_apps(#st{graph = G}) ->
-    Res = app_ctrl_config:init_apps(),
-    ?LOG_DEBUG("init_apps = ~p", [Res]),
+protected_mode_apps(#st{graph = G}) ->
+    Res = app_ctrl_config:protected_mode_apps(),
+    ?LOG_DEBUG("protected_mode_apps = ~p", [Res]),
     Expanded = add_deps(Res, G),
     ?LOG_DEBUG("Expanded = ~p", [Expanded]),
     Expanded.
