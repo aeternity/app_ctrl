@@ -19,6 +19,7 @@
 -record(st, { app
             , start_requested  = false :: boolean()
             , start_reply_sent = false :: boolean()
+            , change_requested = false :: boolean()
             , should_run       = false :: boolean()
             , running          = false :: boolean()
             , loaded           = false :: boolean()
@@ -41,16 +42,19 @@ init(App) ->
 handle_call(_Req, _From, St) ->
     {reply, {error, unknown_call}, St}.
 
-handle_cast({app_running, App, _Node}, #st{app = MyApp} = St) ->
+handle_cast({Event, App, _Node}, #st{app = MyApp} = St) when Event == app_running;
+                                                             Event == app_stopped ->
     case App =/= MyApp of
         true ->
             {noreply, check_app(St)};
         false ->
             {noreply, St}
     end;
-handle_cast({new_mode, _Mode, _Node}, #st{} = St) ->
+handle_cast({new_mode, Mode}, #st{app = MyApp} = St) ->
+    ?LOG_DEBUG("New mode (~p): ~p", [MyApp, Mode]),
     {noreply, check_app(St)};
-handle_cast(_Msg, St) ->
+handle_cast(Msg, #st{app = MyApp} = St) ->
+    ?LOG_DEBUG("Unknown cast (~p): ~p", [MyApp, Msg]),
     {noreply, St}.
 
 handle_info({ac_load_application_req, App}, #st{app = MyApp} = St) ->
@@ -68,10 +72,10 @@ handle_info({ac_start_application_req, App} = Msg, #st{app = MyApp} = St0) ->
             case ok_to_start(MyApp) of
                 true ->
                     ?LOG_DEBUG("will start ~p", [MyApp]),
-                    {noreply, maybe_tell_ac(run, St)};
+                    {noreply, instruct_ac(run, St)};
                 false ->
                     ?LOG_DEBUG("WON'T start ~p", [MyApp]),
-                    {noreply, maybe_tell_ac(dont_run, St)}
+                    {noreply, instruct_ac(dont_run, St)}
             end;
         false ->
             %% Don't use the standard reply helpers, as they note our
@@ -86,13 +90,15 @@ handle_info({ac_application_run, App, Res}, #st{app = App} = St) ->
         ok         -> app_ctrl_server:running(App, node());
         {error, _} -> ignore
     end,
-    {noreply, St#st{running = (ok == Res)}};
-handle_info({ac_application_not_run, App, Res}, #st{app = App} = St) ->
+    {noreply, app_changed(St#st{running = (ok == Res)})};
+handle_info({ac_application_not_run, App}, #st{app = App} = St) ->
     app_ctrl_server:stopped(App, node()),
-    {noreply, St#st{running = (ok =/= Res) orelse St#st.running}};
-handle_info({ac_application_stopped, App}, #st{app = App} = St) ->
+    {noreply, app_changed(St#st{running = false})};
+handle_info({ac_application_stopped, App} = M, #st{app = App} = St) ->
+    ?LOG_DEBUG("~p", [M]),
     case St#st.running of
         true ->
+            %% TODO: this looks weird
             ?AC ! {ac_change_application_req, App, stop_it},
             {noreply, St};
         false ->
@@ -100,7 +106,8 @@ handle_info({ac_application_stopped, App}, #st{app = App} = St) ->
     end;
 handle_info({ac_application_unloaded, App}, #st{app = App} = St) ->
     {noreply, St#st{loaded = false}};
-handle_info(_Msg, St) ->
+handle_info(Msg, #st{app = A} = St) ->
+    ?LOG_DEBUG("UNKNOWN INFO (~p): ~p", [A, Msg]),
     {noreply, St}.
 
 terminate(_Reason, _St) ->
@@ -128,14 +135,21 @@ check_app(#st{start_requested = false} = St) ->
 check_app(#st{app = A} = St) ->
     ShouldRun = app_ctrl_server:should_i_run(A),
     app_should_run(ShouldRun, St).
-            
+
+app_changed(St) ->
+    maybe_check_app(St#st{change_requested = false}).
+
+maybe_check_app(#st{running = R, should_run = R} = St) ->
+    St;
+maybe_check_app(St) ->
+    check_app(St).
 
 app_should_run(Bool, #st{running = Bool} = St) ->
     St;
 app_should_run(false, #st{app = MyApp, running = true} = St) ->
     St1 = case ok_to_stop(MyApp) of
               true ->
-                  maybe_tell_ac(dont_run, St);
+                  instruct_ac(dont_run, St);
               false ->
                   St
           end,
@@ -143,21 +157,25 @@ app_should_run(false, #st{app = MyApp, running = true} = St) ->
 app_should_run(true, #st{app = MyApp, running = false} = St) ->
     St1 = case ok_to_start(MyApp) of
               true ->
-                  maybe_tell_ac(run, St);
+                  instruct_ac(run, St);
               false ->
                   St
           end,
     St1#st{should_run = true}.
 
-maybe_tell_ac(run     , St) -> tell_ac_(start_it, start_it, St);
-maybe_tell_ac(dont_run, St) -> tell_ac_(not_started, stop_it, St).
+instruct_ac(_, #st{change_requested = true, app = A} = St) ->
+    %% Wait for response from AC, then re-assess
+    ?LOG_DEBUG("~p still waiting for AC...", [A]),
+    St;
+instruct_ac(run     , St) -> tell_ac_(start_it, start_it, St);
+instruct_ac(dont_run, St) -> tell_ac_(not_started, stop_it, St).
 
 tell_ac_(_Reply, Change, #st{start_reply_sent = true} = St) ->
     ac_change_req(Change, St),
-    St;
+    St#st{change_requested = true};
 tell_ac_(Reply, _Change, St) ->
     ac_start_reply(Reply, St),
-    St#st{start_reply_sent = true}.
+    St#st{start_reply_sent = true, change_requested = (Reply == start_it)}.
 
 ac_start_reply(Reply, #st{app = App}) ->
     send_to_ac({ac_start_application_reply, App, Reply}).

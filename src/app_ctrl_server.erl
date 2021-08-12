@@ -8,17 +8,20 @@
 
 -export([ start/0
         , start_link/0]).
--export([running/2,
-         stopped/2,
-         set_mode/1,
-         should_i_run/1,
-         ok_to_start/1,
-         ok_to_stop/1,
-         check_dependencies/1]).
+-export([ status/0
+        , running/2
+        , stopped/2
+        , get_mode/0
+        , set_mode/1
+        , should_i_run/1
+        , ok_to_start/1
+        , ok_to_stop/1
+        , check_dependencies/1 ]).
 
 -export([whereis/0]).
 
--export([graph/0]).
+-export([graph/0,
+        controller/1]).
 
 -export([init/1,
          handle_call/3,
@@ -31,6 +34,7 @@
             , role_apps = []
             , allowed_apps = []
             , other_apps = []
+            , live_map = #{}
             , mode
             , graph}).
 -define(TAB, ?MODULE).
@@ -47,6 +51,9 @@ start() ->
 start_link() ->
     gen_server:start_link({local, ?MODULE}, ?MODULE, [], []).
 
+status() ->
+    gen_server:call(?MODULE, status).
+
 whereis() ->
     whereis(?MODULE).
 
@@ -55,6 +62,9 @@ running(App, Node) ->
 
 stopped(App, Node) ->
     gen_server:cast(?MODULE, {app_stopped, App, Node}).
+
+get_mode() ->
+    gen_server:call(?MODULE, get_mode).
 
 set_mode(Mode) ->
     case gen_server:call(?MODULE, {set_mode, Mode}) of
@@ -79,6 +89,9 @@ ok_to_stop(App) ->
 
 graph() ->
     gen_server:call(?MODULE, graph).
+
+controller(App) ->
+    gen_server:call(?MODULE, {controller, App}).
 
 init([]) ->
     ets:new(?TAB, [ordered_set, named_table]),
@@ -113,8 +126,11 @@ deps_of_apps(As, G) ->
       end, ordsets:new(), As).
 
 handle_call({check, Deps}, _From, #st{} = St) ->
-    {reply, check_(Deps), St};
+    {reply, check_(Deps, St), St};
+handle_call(get_mode, _From, #st{mode = CurMode} = St) ->
+    {reply, CurMode, St};
 handle_call({set_mode, Mode}, _From, #st{mode = CurMode} = St) ->
+    ?LOG_DEBUG("set_mode: ~p (CurMode = ~p)", [Mode, CurMode]),
     case Mode of
         CurMode ->
             {reply, ok, St};
@@ -122,7 +138,7 @@ handle_call({set_mode, Mode}, _From, #st{mode = CurMode} = St) ->
             case app_ctrl_deps:valid_mode(Mode) of
                 true ->
                     St1 = set_current_mode(Mode, St),
-                    tell_controllers(new_mode, Mode, node(), St1),
+                    tell_controllers({new_mode, Mode}, St1),
                     {reply, ok, St1};
                 false ->
                     {reply, {error, unknown_mode}, St}
@@ -130,25 +146,13 @@ handle_call({set_mode, Mode}, _From, #st{mode = CurMode} = St) ->
     end;
 handle_call({should_i_run, App}, _From, #st{allowed_apps = Allowed} = St) ->
     {reply, lists:member(App, Allowed), St};
-handle_call({ok_to_start, App}, _From, #st{allowed_apps = Allowed,
-                                           graph = G, mode = M} = St) ->
+handle_call({ok_to_start, App}, _From, #st{mode = M} = St) ->
     ?LOG_DEBUG("ok_to_start ~p, mode = ~p", [App, M]),
-    case lists:member(App, Allowed) of
-        true ->
-            case [A || {_,_,A,{start_after,_}} <- out_edges(G, App),
-                       not (running(A) orelse load_only(A))] of
-                [] ->
-                    {reply, true, St};
-                [_|_] = Other ->
-                    {reply, {false, [{A, not_running} || A <- Other]}, St}
-            end;
-        false ->
-            {reply, {false, not_allowed}, St}
-    end;
+    {reply, ok_to_start_(App, St), St};
 handle_call({ok_to_stop, App}, _From, #st{graph = G} = St) ->
     case [A || {_,A,App1,{start_after,App1}} <- in_edges(G, App),
                App1 =:= App,
-               running(A)] of
+               is_running(A, St)] of
         [] ->
             {reply, true, St};
         [_|_] = Other ->
@@ -156,21 +160,25 @@ handle_call({ok_to_stop, App}, _From, #st{graph = G} = St) ->
     end;
 handle_call(graph, _From, #st{graph = G} = St) ->
     {reply, G, St};
+handle_call({controller, App}, _From, #st{controllers = Cs} = St) ->
+    {reply, proplists:get_value(App, Cs, undefined), St};
+handle_call(status, _From, St) ->
+    {reply, status_(St), St};
 handle_call(_Req, _From, St) ->
     {reply, {error, unknown_call}, St}.
 
-handle_cast({app_running, App, Node}, #st{mode = Mode} = St) ->
-    ets:insert(?TAB, {{App,Node}}),
+handle_cast({app_running, App, Node}, #st{mode = Mode} = St0) ->
+    St = note_running({App, Node}, true, St0),
     tell_controllers(app_running, App, Node, St),
     case {Mode, App} of
         {?PROTECTED_MODE, app_ctrl} ->
             ?LOG_DEBUG("Moving to default mode", []),
-            {noreply, set_default_mode(St)};
+            {noreply, set_next_mode(St)};
         _ ->
             {noreply, St}
     end;
-handle_cast({app_stopped, App, Node}, #st{} = St) ->
-    ets:delete(?TAB, {App,Node}),
+handle_cast({app_stopped, App, Node}, #st{} = St0) ->
+    St = note_running({App, Node}, false, St0),
     tell_controllers(app_stopped, App, Node, St),
     {noreply, St};
 handle_cast(_Msg, St) ->
@@ -186,49 +194,67 @@ code_change(_FromVsn, St, _Extra) ->
     {ok, St}.
 
 start_controllers(AnnotatedDeps) ->
-    [start_controller(A)
-     || {{A,N}, _Deps} <- AnnotatedDeps,
-        N =:= node(),
-        not lists:member(A, [kernel, stdlib])].
+    [ start_controller(A)
+      || {{A,N} = AppNode, _Deps} <- AnnotatedDeps,
+         N =:= node(),
+         not lists:member(A, [kernel, stdlib])
+             andalso not load_only(AppNode) ].
 
-tell_controllers(Event, Apps, Node, #st{controllers = Cs}) when is_list(Apps) ->
-    [gen_server:cast(Pid, {Event, Apps, Node})
-     || {_A, Pid} <- Cs];
+%% tell_controllers(Event, Apps, Node, #st{controllers = Cs}) when is_list(Apps) ->
+%%     ?LOG_DEBUG("tell_controllers(~p, ~p, ~p)", [Event, Apps, Node]),
+%%     [gen_server:cast(Pid, {Event, Apps, Node})
+%%      || {_A, Pid} <- Cs];
 tell_controllers(Event, App, Node, #st{controllers = Cs}) ->
-    [gen_server:cast(Pid, {Event, App, Node})
-     || {A, Pid} <- Cs,
-        A =/= App],
+    ?LOG_DEBUG("tell_controllers(~p, ~p, ~p)", [Event, App, Node]),
+    [gen_server:cast(Pid, {Event, App, Node}) || {_, Pid} <- Cs],
+    ok.
+
+tell_controllers(Event, #st{controllers = Cs}) ->
+    ?LOG_DEBUG("tell_controllers(~p)", [Event]),
+    [gen_server:cast(Pid, Event)
+     || {_, Pid} <- Cs],
     ok.
 
 start_controller(A) ->
     {ok, Pid} = app_ctrl_ctrl:start_link(A),
     {A, Pid}.
 
+note_running(A, Bool, #st{live_map = Map} = St) when is_boolean(Bool) ->
+    Map1 =
+        maps:update_with(A, fun(M0) ->
+                                    M = maps:without([ongoing], M0),
+                                    M#{running => Bool}
+                            end, #{running => Bool}, Map),
+    St#st{live_map = Map1}.
 
-check_(Deps) ->
-    case check_(Deps, []) of
+check_(Deps, St) ->
+    case check_(Deps, St, []) of
         [] ->
             true;
         Other ->
             {false, Other}
     end.
 
-check_([{App, N} = A|Deps], Acc) when is_atom(App), N == node() ->
-    case (running(A) orelse load_only(A)) of
-        true  -> check_(Deps, Acc);
-        false -> check_(Deps, [{App, not_running}|Acc])
+check_([{App, N} = A|Deps], St, Acc) when is_atom(App), N == node() ->
+    case (is_running(A, St) orelse load_only(A)) of
+        true  -> check_(Deps, St, Acc);
+        false -> check_(Deps, St, [{App, not_running}|Acc])
     end;
-check_([], Acc) ->
+check_([], _St, Acc) ->
     Acc.
 
 load_only({App, N}) when N == node() ->
     case application:get_key(App, mod) of
-        {ok, {_, _}} -> true;
-        {ok, []}     -> false
+        {ok, {_, _}} -> false;
+        {ok, []}     -> true;
+        undefined    -> true
     end.
 
-running({_App,N} = A) when N == node() ->
-    ets:member(?TAB, A).
+is_running({_App,N} = A, #st{live_map = Map}) when N == node() ->
+    case maps:find(A, Map) of
+        {ok, #{running := Bool}} -> Bool;
+        error -> false
+    end.
                          
 in_edges(G, App) ->
     [digraph:edge(G, E) || E <- digraph:in_edges(G, App)].
@@ -245,10 +271,10 @@ allowed_apps(Mode, #st{role_apps = RApps, controllers = Cs}) ->
     AppsInMode ++ [A || A <- OtherControlled,
                         not lists:member(A, AppsInMode)].
 
-set_default_mode(St) ->
-    Mode = app_ctrl_config:default_mode(),
+set_next_mode(St) ->
+    Mode = app_ctrl_config:current_mode(),
     St1 = set_current_mode(Mode, St),
-    tell_controllers(new_mode, Mode, node(), St1),
+    tell_controllers({new_mode, Mode}, St1),
     St1.
 
 set_current_mode(?PROTECTED_MODE, #st{controllers = Cs} = St) ->
@@ -289,3 +315,63 @@ add_to_ordset(Xs, Set) ->
 
 intersection(A, B) ->
     A -- (A -- B).
+
+status_(#st{mode = Mode, allowed_apps = AApps, role_apps = RApps} = St) ->
+    Modes = app_ctrl_config:modes(),
+    Roles = app_ctrl_config:roles(),
+    #{ current_mode => Mode
+     , current_roles => proplists:get_value(Mode, app_ctrl_config:modes())
+     , running_locally => running_locally()
+     , running_remotely => running_remotely()
+     , allowed_apps => [A1 || {_, Status} = A1
+                                  <- [ {A, runnable_app_status(A, St)} || A <- AApps ],
+                              Status =/= load_only]
+     , role_apps    => [ {A, controlled_app_status(A, Modes, Roles)} || A <- RApps] }.
+
+running_locally() ->
+    ets:select(?TAB, [{ {{'$1',node()}}, [], ['$1'] }]).
+
+running_remotely() ->
+    ets:select(?TAB, [{ {'$1'}, [{'=/=', {element,2,'$1'}, node()}], ['$1'] }]).
+
+runnable_app_status(A, St) ->
+    ?LOG_DEBUG("runnable_app_status(~p, St)", [A]),
+    AppNode = {A, node()},  %% TODO: fix this when adding distributed ctrl
+    case is_running(AppNode, St) of
+        true ->
+            running;
+        false ->
+            case load_only(AppNode) of
+                true ->
+                    load_only;
+                false ->
+                    case ok_to_start_(A, St) of
+                        true ->
+                            ok_to_start;
+                        {false, Why} ->
+                            {not_started, Why}
+                    end
+            end
+    end.
+
+controlled_app_status(A, Modes, Roles) ->
+    InRoles = [R || {R, As} <- Roles,
+                    lists:member(A, As)],
+    InModes = [M || {M, Rs} <- Modes,
+                    intersection(InRoles, Rs) =/= []],
+    #{ in_roles => InRoles
+     , in_modes => InModes }.
+
+ok_to_start_(App, #st{allowed_apps = Allowed, graph = G} = St) ->
+    case lists:member(App, Allowed) of
+        true ->
+            case [A || {_,_,A,{start_after,_}} <- out_edges(G, App),
+                       not (running(A, St) orelse load_only(A))] of
+                [] ->
+                    true;
+                [_|_] = Other ->
+                    {false, [{A, not_running} || A <- Other]}
+            end;
+        false ->
+            {false, not_allowed}
+    end.

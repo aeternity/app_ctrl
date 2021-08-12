@@ -13,6 +13,8 @@
 
 -include_lib("kernel/include/logger.hrl").
 
+-define(CORE_PROTECTED_MODE_APPS, [setup, gproc, app_ctrl]).
+
 roles() -> get_env_set(roles).
 
 modes() -> get_env_set(modes).
@@ -26,6 +28,7 @@ current_mode() ->
     end.
 
 set_current_mode(Mode) ->
+    ?LOG_DEBUG("set_current_mode(~p)", [Mode]),
     application:set_env(app_ctrl, mode, Mode).
 
 default_mode() ->
@@ -101,6 +104,8 @@ get_original_env(Key) ->
             error(duplicate_app_ctrl_entries)
     end.
 
+get_original_env_(protected_mode_apps) ->
+    [{app_ctrl, ?CORE_PROTECTED_MODE_APPS}];
 get_original_env_(Key) ->
     case application:get_env(app_ctrl, Key) of
         {ok, Val} ->
