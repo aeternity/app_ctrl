@@ -4,7 +4,10 @@
         , dependencies_of/1
         , app_dependencies/1
         , get_mode/0
-        , set_mode/1 ]).
+        , set_mode/1
+        , set_and_await_mode/2
+        , is_mode_stable/0
+        , await_stable_mode/1 ]).
 
 status() ->
     app_ctrl_server:status().
@@ -27,3 +30,14 @@ set_mode(Mode) ->
         false ->
             error(unknown_mode)
     end.
+
+set_and_await_mode(Mode, Timeout) ->
+    set_mode(Mode),
+    await_stable_mode(Timeout).
+
+is_mode_stable() ->
+    app_ctrl_server:is_mode_stable().
+
+await_stable_mode(Timeout) when Timeout == infinity
+                              ; is_integer(Timeout), Timeout > 0 ->
+    app_ctrl_server:await_stable_mode(Timeout).

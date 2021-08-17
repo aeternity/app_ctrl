@@ -16,7 +16,9 @@
         , should_i_run/1
         , ok_to_start/1
         , ok_to_stop/1
-        , check_dependencies/1 ]).
+        , check_dependencies/1
+        , is_mode_stable/0
+        , await_stable_mode/1 ]).
 
 -export([whereis/0]).
 
@@ -35,7 +37,10 @@
             , allowed_apps = []
             , other_apps = []
             , live_map = #{}
+            , running_where = #{}
+            , pending_stable = []
             , mode
+            , stable = false
             , graph}).
 -define(TAB, ?MODULE).
 
@@ -86,6 +91,12 @@ ok_to_start(App) ->
 
 ok_to_stop(App) ->
     gen_server:call(?MODULE, {ok_to_stop, App}).
+
+is_mode_stable() ->
+    gen_server:call(?MODULE, is_mode_stable).
+
+await_stable_mode(Timeout) ->
+    gen_server:call(?MODULE, {await_stable_mode, Timeout}).
 
 graph() ->
     gen_server:call(?MODULE, graph).
@@ -144,8 +155,10 @@ handle_call({set_mode, Mode}, _From, #st{mode = CurMode} = St) ->
                     {reply, {error, unknown_mode}, St}
             end
     end;
-handle_call({should_i_run, App}, _From, #st{allowed_apps = Allowed} = St) ->
-    {reply, lists:member(App, Allowed), St};
+handle_call({should_i_run, App}, _From, #st{ allowed_apps = Allowed
+                                           , other_apps = Other } = St) ->
+    {reply, (lists:member(App, Allowed)
+             orelse lists:member(App, Other)), St};
 handle_call({ok_to_start, App}, _From, #st{mode = M} = St) ->
     ?LOG_DEBUG("ok_to_start ~p, mode = ~p", [App, M]),
     {reply, ok_to_start_(App, St), St};
@@ -164,6 +177,16 @@ handle_call({controller, App}, _From, #st{controllers = Cs} = St) ->
     {reply, proplists:get_value(App, Cs, undefined), St};
 handle_call(status, _From, St) ->
     {reply, status_(St), St};
+handle_call(is_mode_stable, _From, St) ->
+    {reply, is_stable(St), St};
+handle_call({await_stable_mode, Timeout}, From, #st{pending_stable = Pending} = St) ->
+    case St#st.stable of
+        true ->
+            {reply, {ok, St#st.mode}, St};
+        false ->
+            TRef = set_timeout(Timeout, {awaiting_stable, From}),
+            {noreply, St#st{pending_stable = [{From, TRef} | Pending]}}
+    end;
 handle_call(_Req, _From, St) ->
     {reply, {error, unknown_call}, St}.
 
@@ -175,15 +198,28 @@ handle_cast({app_running, App, Node}, #st{mode = Mode} = St0) ->
             ?LOG_DEBUG("Moving to default mode", []),
             {noreply, set_next_mode(St)};
         _ ->
-            {noreply, St}
+            {noreply, check_if_stable(St)}
     end;
 handle_cast({app_stopped, App, Node}, #st{} = St0) ->
     St = note_running({App, Node}, false, St0),
     tell_controllers(app_stopped, App, Node, St),
-    {noreply, St};
+    {noreply, check_if_stable(St)};
 handle_cast(_Msg, St) ->
     {noreply, St}.
 
+handle_info({timeout, TRef, {awaiting_stable, From}}, #st{pending_stable = Pend} = St) ->
+    case lists:keytake(TRef, 2, Pend) of
+        {value, {From, _}, Pend1} ->
+            case is_stable(St) of
+                true ->
+                    notify_pending({ok, St#st.mode}, St#st{stable = true});
+                {false, Outstanding} ->
+                    gen_server:reply(From, {timeout, Outstanding}),
+                    {noreply, St#st{pending_stable = Pend1}}
+            end;
+        false ->
+            {noreply, St}
+    end;
 handle_info(_Msg, St) ->
     {noreply, St}.
 
@@ -219,13 +255,26 @@ start_controller(A) ->
     {ok, Pid} = app_ctrl_ctrl:start_link(A),
     {A, Pid}.
 
-note_running(A, Bool, #st{live_map = Map} = St) when is_boolean(Bool) ->
+note_running(A, Bool, #st{live_map = Map, running_where = Where} = St) when is_boolean(Bool) ->
+    {AppName, Node} = A,
     Map1 =
         maps:update_with(A, fun(M0) ->
                                     M = maps:without([ongoing], M0),
                                     M#{running => Bool}
                             end, #{running => Bool}, Map),
-    St#st{live_map = Map1}.
+    Where1 = case Bool of
+                 true ->
+                     maps:update_with(AppName,
+                                      fun(Ns) ->
+                                              ordsets:add_element(Node, Ns)
+                                      end, ordsets:from_list([Node]), Where);
+                 false ->
+                     maps:update_with(AppName,
+                                      fun(Ns) ->
+                                              ordsets:del_element(Node, Ns)
+                                      end, ordsets:new(), Where)
+             end,
+    St#st{live_map = Map1, running_where = Where1}.
 
 check_(Deps, St) ->
     case check_(Deps, St, []) of
@@ -255,7 +304,48 @@ is_running({_App,N} = A, #st{live_map = Map}) when N == node() ->
         {ok, #{running := Bool}} -> Bool;
         error -> false
     end.
-                         
+
+set_timeout(infinity, _) ->
+    infinity;
+set_timeout(T, Msg) when is_integer(T), T >= 0 ->
+    erlang:start_timer(T, self(), Msg).
+
+
+check_if_stable(#st{mode = Mode} = St) ->
+    case is_stable(St) of
+        true ->
+            notify_pending({ok, Mode}, St#st{stable = true});
+        {false, _Outstanding} ->
+            St
+    end.
+
+is_stable(#st{} = St) ->
+    case not_running(St) ++ not_stopped(St) of
+        [] ->
+            true;
+        Other ->
+            {false, Other}
+    end.
+
+not_running(#st{allowed_apps = Allowed} = St) ->
+    opt_attr(not_running, [A || A <- Allowed,
+                                not is_running({A, node()}, St)]).
+
+not_stopped(#st{allowed_apps = Allowed, role_apps = RApps} = St) ->
+    opt_attr(not_stopped, [R || R <- (RApps -- Allowed),
+                                is_running({R, node()}, St)]).
+
+opt_attr(_  , []) -> [];
+opt_attr(Key, L)  -> [{Key, L}].
+
+notify_pending(Msg, #st{pending_stable = Pend} = St) ->
+    lists:foreach(
+      fun({From, TRef}) ->
+              erlang:cancel_timer(TRef),
+              gen_server:reply(From, Msg)
+      end, Pend),
+    St#st{pending_stable = []}.
+
 in_edges(G, App) ->
     [digraph:edge(G, E) || E <- digraph:in_edges(G, App)].
 
@@ -264,12 +354,12 @@ out_edges(G, App) ->
 
 allowed_apps(undefined, #st{controllers = Cs}) ->
     [A || {A, _} <- Cs];
-allowed_apps(Mode, #st{role_apps = RApps, controllers = Cs}) ->
-    AppsInMode = app_ctrl_deps:apps_in_mode(Mode),
-    OtherControlled = [A || {A,_} <- Cs,
-                            not lists:member(A, RApps)],
-    AppsInMode ++ [A || A <- OtherControlled,
-                        not lists:member(A, AppsInMode)].
+allowed_apps(Mode, #st{role_apps = _RApps, controllers = _Cs}) ->
+    _AppsInMode = app_ctrl_deps:apps_in_mode(Mode).
+    %% OtherControlled = [A || {A,_} <- Cs,
+    %%                         not lists:member(A, RApps)],
+    %% AppsInMode ++ [A || A <- OtherControlled,
+    %%                     not lists:member(A, AppsInMode)].
 
 set_next_mode(St) ->
     Mode = app_ctrl_config:current_mode(),
@@ -278,10 +368,12 @@ set_next_mode(St) ->
     St1.
 
 set_current_mode(?PROTECTED_MODE, #st{controllers = Cs} = St) ->
-    St#st{mode = ?PROTECTED_MODE, allowed_apps = any_active(protected_mode_apps(St), Cs)};
-set_current_mode(Mode, #st{other_apps = Other} = St) ->
+    St#st{ mode = ?PROTECTED_MODE
+         , stable = false
+         , allowed_apps = any_active(protected_mode_apps(St), Cs)};
+set_current_mode(Mode, #st{} = St) ->
     Allowed = allowed_apps(Mode, St),
-    St#st{mode = Mode, allowed_apps = Allowed ++ Other}.
+    St#st{mode = Mode, allowed_apps = Allowed, stable = false}.
 
 any_active(As, Cs) ->
     intersection(As, [A || {A, _} <- Cs]).
@@ -362,8 +454,8 @@ controlled_app_status(A, Modes, Roles) ->
     #{ in_roles => InRoles
      , in_modes => InModes }.
 
-ok_to_start_(App, #st{allowed_apps = Allowed, graph = G} = St) ->
-    case lists:member(App, Allowed) of
+ok_to_start_(App, #st{allowed_apps = Allowed, other_apps = Other, graph = G} = St) ->
+    case lists:member(App, Allowed) orelse lists:member(App, Other) of
         true ->
             case [A || {_,_,A,{start_after,_}} <- out_edges(G, App),
                        not (running(A, St) orelse load_only(A))] of
