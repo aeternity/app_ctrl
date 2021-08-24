@@ -96,7 +96,9 @@ is_mode_stable() ->
     gen_server:call(?MODULE, is_mode_stable).
 
 await_stable_mode(Timeout) ->
-    gen_server:call(?MODULE, {await_stable_mode, Timeout}).
+    %% We don't want the call itself to time out.
+    %% Assume that the server will never get stuck.
+    gen_server:call(?MODULE, {await_stable_mode, Timeout}, infinity).
 
 graph() ->
     gen_server:call(?MODULE, graph).
@@ -458,7 +460,7 @@ ok_to_start_(App, #st{allowed_apps = Allowed, other_apps = Other, graph = G} = S
     case lists:member(App, Allowed) orelse lists:member(App, Other) of
         true ->
             case [A || {_,_,A,{start_after,_}} <- out_edges(G, App),
-                       not (running(A, St) orelse load_only(A))] of
+                       not (is_running(A, St) orelse load_only(A))] of
                 [] ->
                     true;
                 [_|_] = Other ->
