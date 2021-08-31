@@ -18,12 +18,12 @@
         , ok_to_stop/1
         , check_dependencies/1
         , is_mode_stable/0
-        , await_stable_mode/1 ]).
+        , await_stable_mode/1
+        , check_for_new_applications/0 ]).
 
 -export([whereis/0]).
 
--export([graph/0,
-        controller/1]).
+-export([graph/0]).
 
 -export([init/1,
          handle_call/3,
@@ -42,7 +42,6 @@
             , mode
             , stable = false
             , graph}).
--define(TAB, ?MODULE).
 
 -define(PROTECTED_MODE, app_ctrl_protected).  %% hard-coded app list
 
@@ -100,16 +99,21 @@ await_stable_mode(Timeout) ->
     %% Assume that the server will never get stuck.
     gen_server:call(?MODULE, {await_stable_mode, Timeout}, infinity).
 
+check_for_new_applications() ->
+    gen_server:call(?MODULE, check_for_new_applications).
+
 graph() ->
     gen_server:call(?MODULE, graph).
 
-controller(App) ->
-    gen_server:call(?MODULE, {controller, App}).
-
 init([]) ->
-    ets:new(?TAB, [ordered_set, named_table]),
-    ets:insert(?TAB, [{{A, node()}}
-                      || {A, _, _} <- application:which_applications()]),
+    St = init_state(#st{}),
+    {ok, set_current_mode(?PROTECTED_MODE, St)}.
+
+init_state(#st{} = St0) ->
+    case St0#st.graph of
+        undefined -> ok;
+        G0 -> digraph:delete(G0)
+    end,
     #{graph := G, annotated := Deps} = app_ctrl_deps:dependencies(),
     RoleApps = app_ctrl_deps:role_apps(),   %% all apps controlled via roles
     ?LOG_DEBUG(#{role_apps => RoleApps}),
@@ -117,19 +121,19 @@ init([]) ->
     case [A || A <- RoleAppDeps,
                not lists:member(A, RoleApps)] of
         [] ->
-            Controllers = start_controllers(Deps),
+            %% For now, assume that apps are never removed from the system
+            Controllers = start_new_controllers(Deps, St0#st.controllers),
             ?LOG_DEBUG("Controllers = ~p", [lists:sort(Controllers)]),
             OtherApps = [A || {A,_} <- Controllers, not lists:member(A, RoleApps)],
-            {ok, set_current_mode(
-                   ?PROTECTED_MODE,
-                   #st{ controllers = Controllers
-                      , role_apps = RoleApps
-                      , other_apps = OtherApps
-                      , graph = G})};
+            St0#st{ controllers = Controllers
+                  , role_apps = RoleApps
+                  , other_apps = OtherApps
+                  , graph = G};
         Orphans ->
             ?LOG_ERROR(#{apps_not_found => Orphans}),
             error({orphans, Orphans})
     end.
+
 
 deps_of_apps(As, G) ->
     lists:foldl(
@@ -151,7 +155,7 @@ handle_call({set_mode, Mode}, _From, #st{mode = CurMode} = St) ->
             case app_ctrl_deps:valid_mode(Mode) of
                 true ->
                     St1 = set_current_mode(Mode, St),
-                    tell_controllers({new_mode, Mode}, St1),
+                    announce_new_mode(Mode, St1),
                     {reply, ok, St1};
                 false ->
                     {reply, {error, unknown_mode}, St}
@@ -175,8 +179,6 @@ handle_call({ok_to_stop, App}, _From, #st{graph = G} = St) ->
     end;
 handle_call(graph, _From, #st{graph = G} = St) ->
     {reply, G, St};
-handle_call({controller, App}, _From, #st{controllers = Cs} = St) ->
-    {reply, proplists:get_value(App, Cs, undefined), St};
 handle_call(status, _From, St) ->
     {reply, status_(St), St};
 handle_call(is_mode_stable, _From, St) ->
@@ -189,12 +191,29 @@ handle_call({await_stable_mode, Timeout}, From, #st{pending_stable = Pending} = 
             TRef = set_timeout(Timeout, {awaiting_stable, From}),
             {noreply, St#st{pending_stable = [{From, TRef} | Pending]}}
     end;
+handle_call(check_for_new_applications, _From, #st{ mode = Mode
+                                                  , allowed_apps = Allowed0} = St0) ->
+    St = init_state(St0),
+    case allowed_apps(St#st.mode, St) of
+        Allowed0 ->
+            {reply, ok, St};
+        NewAllowedApps ->
+            St1 = St#st{allowed_apps = NewAllowedApps},
+            case St1#st.stable of
+                false ->
+                    {reply, ok, St1};
+                true ->
+                    announce_new_mode(Mode, St1),
+                    {reply, ok, St1#st{stable = false}}
+            end
+    end;
 handle_call(_Req, _From, St) ->
     {reply, {error, unknown_call}, St}.
 
 handle_cast({app_running, App, Node}, #st{mode = Mode} = St0) ->
     St = note_running({App, Node}, true, St0),
     tell_controllers(app_running, App, Node, St),
+    publish_event(app_running, {App, Node}, St),
     case {Mode, App} of
         {?PROTECTED_MODE, app_ctrl} ->
             ?LOG_DEBUG("Moving to default mode", []),
@@ -205,6 +224,7 @@ handle_cast({app_running, App, Node}, #st{mode = Mode} = St0) ->
 handle_cast({app_stopped, App, Node}, #st{} = St0) ->
     St = note_running({App, Node}, false, St0),
     tell_controllers(app_stopped, App, Node, St),
+    publish_event(app_stopped, {App, Node}, St),
     {noreply, check_if_stable(St)};
 handle_cast(_Msg, St) ->
     {noreply, St}.
@@ -231,17 +251,19 @@ terminate(_Reason, _St) ->
 code_change(_FromVsn, St, _Extra) ->
     {ok, St}.
 
-start_controllers(AnnotatedDeps) ->
+start_new_controllers(AnnotatedDeps, Controllers) ->
     [ start_controller(A)
       || {{A,N} = AppNode, _Deps} <- AnnotatedDeps,
          N =:= node(),
          not lists:member(A, [kernel, stdlib])
-             andalso not load_only(AppNode) ].
+             andalso not lists:keymember(A, 1, Controllers)
+             andalso not load_only(AppNode) ]
+        ++ Controllers.
 
-%% tell_controllers(Event, Apps, Node, #st{controllers = Cs}) when is_list(Apps) ->
-%%     ?LOG_DEBUG("tell_controllers(~p, ~p, ~p)", [Event, Apps, Node]),
-%%     [gen_server:cast(Pid, {Event, Apps, Node})
-%%      || {_A, Pid} <- Cs];
+announce_new_mode(Mode, St) ->
+    tell_controllers({new_mode, Mode}, St),
+    publish_event(new_mode, Mode, St).
+
 tell_controllers(Event, App, Node, #st{controllers = Cs}) ->
     ?LOG_DEBUG("tell_controllers(~p, ~p, ~p)", [Event, App, Node]),
     [gen_server:cast(Pid, {Event, App, Node}) || {_, Pid} <- Cs],
@@ -348,6 +370,11 @@ notify_pending(Msg, #st{pending_stable = Pend} = St) ->
       end, Pend),
     St#st{pending_stable = []}.
 
+publish_event(_, _, #st{mode = ?PROTECTED_MODE}) ->
+    ok;
+publish_event(Event, Info, _St) ->
+    app_ctrl_events:publish(Event, Info).
+
 in_edges(G, App) ->
     [digraph:edge(G, E) || E <- digraph:in_edges(G, App)].
 
@@ -355,9 +382,11 @@ out_edges(G, App) ->
     [digraph:edge(G, E) || E <- digraph:out_edges(G, App)].
 
 allowed_apps(undefined, #st{controllers = Cs}) ->
-    [A || {A, _} <- Cs];
+    lists:sort([A || {A, _} <- Cs]);
+allowed_apps(?PROTECTED_MODE, #st{controllers = Cs} = St) ->
+    any_active(protected_mode_apps(St), Cs);
 allowed_apps(Mode, #st{role_apps = _RApps, controllers = _Cs}) ->
-    _AppsInMode = app_ctrl_deps:apps_in_mode(Mode).
+    _AppsInMode = lists:sort(app_ctrl_deps:apps_in_mode(Mode)).
     %% OtherControlled = [A || {A,_} <- Cs,
     %%                         not lists:member(A, RApps)],
     %% AppsInMode ++ [A || A <- OtherControlled,
@@ -366,13 +395,9 @@ allowed_apps(Mode, #st{role_apps = _RApps, controllers = _Cs}) ->
 set_next_mode(St) ->
     Mode = app_ctrl_config:current_mode(),
     St1 = set_current_mode(Mode, St),
-    tell_controllers({new_mode, Mode}, St1),
+    announce_new_mode(Mode, St1),
     St1.
 
-set_current_mode(?PROTECTED_MODE, #st{controllers = Cs} = St) ->
-    St#st{ mode = ?PROTECTED_MODE
-         , stable = false
-         , allowed_apps = any_active(protected_mode_apps(St), Cs)};
 set_current_mode(Mode, #st{} = St) ->
     Allowed = allowed_apps(Mode, St),
     St#st{mode = Mode, allowed_apps = Allowed, stable = false}.
@@ -415,18 +440,23 @@ status_(#st{mode = Mode, allowed_apps = AApps, role_apps = RApps} = St) ->
     Roles = app_ctrl_config:roles(),
     #{ current_mode => Mode
      , current_roles => proplists:get_value(Mode, app_ctrl_config:modes())
-     , running_locally => running_locally()
-     , running_remotely => running_remotely()
+     , running_locally => running_locally(St)
+     , running_remotely => running_remotely(St)
      , allowed_apps => [A1 || {_, Status} = A1
                                   <- [ {A, runnable_app_status(A, St)} || A <- AApps ],
                               Status =/= load_only]
      , role_apps    => [ {A, controlled_app_status(A, Modes, Roles)} || A <- RApps] }.
 
-running_locally() ->
-    ets:select(?TAB, [{ {{'$1',node()}}, [], ['$1'] }]).
+running_locally(#st{running_where = R}) ->
+    maps:filter(
+      fun(_App, Ns) -> ordsets:is_element(node(), Ns) end, R).
 
-running_remotely() ->
-    ets:select(?TAB, [{ {'$1'}, [{'=/=', {element,2,'$1'}, node()}], ['$1'] }]).
+running_remotely(#st{running_where = R}) ->
+    maps:filter(
+      fun(_App, Ns) -> not ordsets:is_empty(Ns)
+                           andalso
+                           not ordsets:is_element(node(), Ns)
+      end, R).
 
 runnable_app_status(A, St) ->
     ?LOG_DEBUG("runnable_app_status(~p, St)", [A]),

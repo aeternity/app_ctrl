@@ -40,6 +40,22 @@ will be considered background apps, and are started as usual by the OTP
 For a description of the protocol used between the `application_controller`
 and the controller processes, see comments in `application_controller.erl`.
 
+## Event notifications
+
+The `app_ctrl` application provides a pub-sub interface (based on `gproc_ps`)
+for keeping track of application start events. To subscribe, call
+`app_ctrl_events:subscribe(EventCategory)`. Notifications will be delivered
+as messages of the form `{gproc_ps_event, {app_ctrl, Event}, Info}`, where
+the events can be:
+
+* `Event :: app_running | app_stopped`, `Info :: {app_name(), node()}`
+* `Event :: new_mode`, `Info :: mode_name()`
+
+Note that `new_mode` signals the intention to switch to a new mode, or
+possibly that the definition of a mode currently being implemented has been
+refreshed. In order to await the completion of a mode shift, use
+`app_ctrl:await_stable_mode()`.
+
 ## Configuring `app_ctrl`
 
 The idea is to automate parts of the configuration, e.g. through a rebar3

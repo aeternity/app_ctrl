@@ -7,7 +7,8 @@
         , set_mode/1
         , set_and_await_mode/2
         , is_mode_stable/0
-        , await_stable_mode/1 ]).
+        , await_stable_mode/1
+        , check_for_new_applications/0 ]).
 
 status() ->
     app_ctrl_server:status().
@@ -41,3 +42,6 @@ is_mode_stable() ->
 await_stable_mode(Timeout) when Timeout == infinity
                               ; is_integer(Timeout), Timeout > 0 ->
     app_ctrl_server:await_stable_mode(Timeout).
+
+check_for_new_applications() ->
+    app_ctrl_server:check_for_new_applications().

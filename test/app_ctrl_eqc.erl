@@ -18,6 +18,9 @@
 %% QuickCheck API.
 
 -module(app_ctrl_eqc).
+
+-ifdef(EQC).
+
 -include_lib("eqc/include/eqc.hrl").
 -compile([export_all, nowarn_export_all]).
 
@@ -442,3 +445,4 @@ satisfies_group(Processors,Assignment,Group={_,Props}) ->
 getp(Name,PL) ->
     proplists:get_value(Name,PL).
 
+-endif.
