@@ -9,7 +9,17 @@
         , removing_handler/1
         ]).
 
+-export([ update_server_pid/1 ]).
+
 -include_lib("kernel/include/logger.hrl").
+
+%%% ======================================================================
+%%% State updates
+
+update_server_pid(Pid) when is_pid(Pid) ->
+    {ok, #{config := HConf}} = logger:get_handler_config(app_ctrl),
+    logger:update_handler_config(
+      app_ctrl, config, HConf#{app_ctrl_server => Pid}).
 
 %%% ======================================================================
 %%% Logger callbacks

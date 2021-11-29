@@ -55,7 +55,7 @@ whereis_server() ->
             case logger:get_handler_config(app_ctrl) of
                 {ok, #{config := #{app_ctrl_server := Pid}}} ->
                     ?LOG_DEBUG("got pid from handler config: ~p", [Pid]),
-                    Pid;
+                    maybe_restart_server(Pid);
                 {error, {not_found,_}} ->
                     ?LOG_DEBUG("handler not installed, installing", []),
                     ok = logger:add_handler(app_ctrl, app_ctrl_bootstrap, #{}),
@@ -67,4 +67,18 @@ whereis_server() ->
         Pid ->
             ?LOG_DEBUG("app_ctrl_server Pid = ~p", [Pid]),
             Pid
+    end.
+
+%% This can happen either if the app_ctrl_server crashes, which in its turn
+%% should crash the proxy, and the proxy restarts. It could also happen if the
+%% app_ctrl application is stopped and restarted (perhaps in eunit tests).
+%%
+maybe_restart_server(Pid) when is_pid(Pid) ->
+    case is_process_alive(Pid) of
+        true ->
+            Pid;
+        false ->
+            {ok, NewPid} = app_ctrl_server:start_link(),
+            ok = app_ctrl_bootstrap:update_server_pid(NewPid),
+            NewPid
     end.
