@@ -25,7 +25,7 @@ adding_handler(Config) ->
     Config1 = Config#{ filters => []
                      , level => none
                      , filter_default => stop
-                     , app_ctrl_server => Pid },
+                     , config => #{app_ctrl_server => Pid} },
     {ok, Config1}.
 
 %%% Updating handler config
