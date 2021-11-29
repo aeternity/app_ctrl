@@ -18,13 +18,15 @@
         , code_change/3
         ]).
 
+-include_lib("kernel/include/logger.hrl").
+
 -record(st, {server :: pid() }).
 
 start_link() ->
     gen_server:start_link({local, ?MODULE}, ?MODULE, [], []).
 
 init([]) ->
-    case app_ctrl_server:whereis() of
+    case whereis_server() of
         undefined ->
             {error, no_app_ctrl_server};
         Pid when is_pid(Pid) ->
@@ -46,3 +48,26 @@ terminate(_Reason, _St) ->
 
 code_change(_FromVsn, St, _Extra) ->
     {ok, St}.
+
+%% ======================================================================
+
+whereis_server() ->
+    case app_ctrl_server:whereis() of
+        undefined ->
+            ?LOG_DEBUG("app_ctrl_server:whereis() -> undefined", []),
+            case logger:get_handler_config(app_ctrl) of
+                {ok, #{app_ctrl_server := Pid}} ->
+                    ?LOG_DEBUG("got pid from handler config: ~p", [Pid]),
+                    Pid;
+                {error, {not_found,_}} ->
+                    ?LOG_DEBUG("handler not installed, installing", []),
+                    ok = logger:add_handler(app_ctrl, app_ctrl_bootstrap, #{}),
+                    {ok, #{app_ctrl_server := Pid}} =
+                        logger:get_handler_config(app_ctrl),
+                    ?LOG_DEBUG("handler installed Pid = ~p", [Pid]),
+                    Pid
+            end;
+        Pid ->
+            ?LOG_DEBUG("app_ctrl_server Pid = ~p", [Pid]),
+            Pid
+    end.
