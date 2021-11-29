@@ -111,6 +111,12 @@ Inspecting the logger handler via `logger:i()` will reveal something like this:
             app_ctrl_server: <0.1959.0>
 ```
 
+If the handler hasn't been configured to install at startup, it will be
+added by the `app_ctrl` application as soon as it starts. So if your
+system relies on a custom startup procedure, calling
+`application:ensure_all_started(app_ctrl)` as one of the first steps
+should also work.
+
 ### Configuration details
 
 The `app_ctrl` configuration can either be defined in the `app_ctrl` app
