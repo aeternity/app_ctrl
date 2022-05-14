@@ -2,13 +2,19 @@
 
 **Author:** Ulf Wiger <ulf@wiger.net>
 
-This application implements an OTP distributed application controller.
+This application implements an OTP (eventually distributed) application controller.
 
-Currently, only local application control is supported, but one particular
-feature is that it allows applications to be started *before* another
-application.
+Currently, only local application control is supported.
+
+Features:
+* Protected-mode startup phase
+* Support for `before` application dependencies
+* Support for multiple modes, including runtime mode switching
+* Gproc-based event reporting
 
 ## Background
+
+
 
 The standard application controller respects dependencies specified in
 an application's `.app` file, where the `applications` attribute lists
@@ -44,7 +50,7 @@ and the controller processes, see comments in `application_controller.erl`.
 
 The `app_ctrl` application provides a pub-sub interface (based on `gproc_ps`)
 for keeping track of application start events. To subscribe, call
-`app_ctrl_events:subscribe(EventCategory)`. Notifications will be delivered
+`app_ctrl_events:subscribe(Event)`. Notifications will be delivered
 as messages of the form `{gproc_ps_event, {app_ctrl, Event}, Info}`, where
 the events can be:
 
@@ -79,7 +85,7 @@ plugin, but currently, all configuration needs to be done manually.
  ]}
 ```
 * In order for the application control to work, a dummy `logger` handler
-  must be installed like so:
+  must be installed in `logger`, e.g. by putting the following in `sys.config`:
 
 ```erlang
 {kernel, [
