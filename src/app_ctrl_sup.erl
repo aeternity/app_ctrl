@@ -1,6 +1,7 @@
 %%% -*- mode: erlang; erlang-indent-level: 4; indent-tabs-mode: nil -*-
 %%%-------------------------------------------------------------------
-%%% @copyright (C) 2018, Aeternity Anstalt
+%%% @copyright (C) 2018-22, Aeternity Anstalt
+%%% @hidden
 %%%-------------------------------------------------------------------
 %% @doc app_ctrl top level supervisor.
 %% @end

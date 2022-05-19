@@ -1,6 +1,8 @@
 %%% -*- mode: erlang; erlang-indent-level: 4; indent-tabs-mode: nil -*-
 %%%-------------------------------------------------------------------
 %%% @copyright (C) 2018-21, Aeternity Anstalt
+%%% @author Ulf Wiger <ulf@wiger.net>
+%%% @hidden
 %%%-------------------------------------------------------------------
 
 %%% Dependency management

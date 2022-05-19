@@ -1,5 +1,7 @@
 %%%-------------------------------------------------------------------
-%%% @copyright (C) 2018, Aeternity Anstalt
+%%% @copyright 2018-22 Aeternity Anstalt
+%%% @author Ulf Wiger <ulf@wiger.net>
+%%% @hidden
 %%%-------------------------------------------------------------------
 -module(app_ctrl_ctrl).
 

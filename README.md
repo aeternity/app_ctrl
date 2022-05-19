@@ -8,6 +8,8 @@ Currently, only local application control is supported, but one particular
 feature is that it allows applications to be started *before* another
 application.
 
+**[API documentation](API_DOCS.md)**
+
 ## Background
 
 The standard application controller respects dependencies specified in
@@ -21,10 +23,11 @@ before a third-party application, whose `.app` file is already set.
 For example:
 
 * An application running before mnesia, which checks conditions and
-  e.g. creates a database schema (this must be done before mnesia starts)
+  e.g. creates a database schema or dynamically calculates
+  `extra_db_nodes` (this must be done before mnesia starts).
 * Applications needed by `exometer_core` probes, which could then be
   declaratively defined and started automatically by `exometer_core`.
-  
+
 Currently, only local application control is supported.
 
 ## Implementation
@@ -58,7 +61,7 @@ refreshed. In order to await the completion of a mode shift, use
 
 ## Configuring `app_ctrl`
 
-The idea is to automate parts of the configuration, e.g. through a rebar3
+One idea is to automate parts of the configuration, e.g. through a rebar3
 plugin, but currently, all configuration needs to be done manually.
 
 * Set the `app_ctrl` application environment variable `applications`.
@@ -78,8 +81,8 @@ plugin, but currently, all configuration needs to be done manually.
    ]}
  ]}
 ```
-* In order for the application control to work, a dummy `logger` handler
-  must be installed like so:
+* In order for the application control to work best, a dummy `logger`
+  handler should be installed like so:
 
 ```erlang
 {kernel, [
@@ -117,6 +120,11 @@ system relies on a custom startup procedure, calling
 `application:ensure_all_started(app_ctrl)` as one of the first steps
 should also work.
 
+Note, however, that there will then be a gap between the start of the
+mandatory `kernel` and `stdlib` apps, and the start of `app_ctrl`,
+and this might create a window where applications are started before
+`app_ctrl` is able to take control of them.
+
 ### Configuration details
 
 The `app_ctrl` configuration can either be defined in the `app_ctrl` app
@@ -129,7 +137,7 @@ incrementally modifying settings under a `modify` rubric as described below.
 
 The `applications` list is mainly intended to allow certain applications
 to be started _before_ other applications. This is not possible to specify
-in the OTP application controller, but can be useful e.g. in order to ensure 
+in the OTP application controller, but can be useful e.g. in order to ensure
 that a preparatory application gets to run before some third-party app whose
 `applications` dependencies can't easily be changed.
 

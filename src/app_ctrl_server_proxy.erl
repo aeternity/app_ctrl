@@ -1,4 +1,9 @@
 %% -*- mode: erlang; erlang-indent-level: 4; indent-tabs-mode: nil -*-
+
+%%% @copyright 2018-22 Aeternity Anstalt
+%%% @author Ulf Wiger <ulf@wiger.net>
+%%% @hidden
+
 -module(app_ctrl_server_proxy).
 -behaviour(gen_server).
 

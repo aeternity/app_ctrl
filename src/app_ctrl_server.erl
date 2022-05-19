@@ -1,6 +1,7 @@
 %%% -*- mode: erlang; erlang-indent-level: 4; indent-tabs-mode: nil -*-
 %%%-------------------------------------------------------------------
-%%% @copyright (C) 2018, Aeternity Anstalt
+%%% @copyright (C) 2018-22, Aeternity Anstalt
+%%% @hidden
 %%%-------------------------------------------------------------------
 -module(app_ctrl_server).
 
@@ -430,7 +431,6 @@ add_deps_(A, G, Acc) ->
 
 add_to_ordset(Xs, Set) ->
     lists:foldr(fun ordsets:add_element/2, Set, Xs).
-              
 
 intersection(A, B) ->
     A -- (A -- B).
@@ -453,9 +453,8 @@ running_locally(#st{running_where = R}) ->
 
 running_remotely(#st{running_where = R}) ->
     maps:filter(
-      fun(_App, Ns) -> not ordsets:is_empty(Ns)
-                           andalso
-                           not ordsets:is_element(node(), Ns)
+      fun(_App, Ns) -> not ordsets:is_empty(
+                             ordsets:del_element(node(), Ns))
       end, R).
 
 runnable_app_status(A, St) ->

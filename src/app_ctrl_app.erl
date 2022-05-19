@@ -1,8 +1,9 @@
 %%% -*- mode: erlang; erlang-indent-level: 4; indent-tabs-mode: nil -*-
 %%%-------------------------------------------------------------------
 %%% @copyright (C) 2018, Aeternity Anstalt
+%%% @hidden
 %%%-------------------------------------------------------------------
-%% @doc app_ctrl public API
+%% @doc app_ctrl application callback module
 %% @end
 %%%-------------------------------------------------------------------
 
