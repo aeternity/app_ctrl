@@ -1,6 +1,7 @@
 %%% -*- mode: erlang; erlang-indent-level: 4; indent-tabs-mode: nil -*-
 %%%-------------------------------------------------------------------
-%%% @copyright (C) 2018, Aeternity Anstalt
+%%% @copyright (C) 2018-22, Aeternity Anstalt
+%%% @hidden
 %%%-------------------------------------------------------------------
 %% @doc app_ctrl top level supervisor.
 %% @end
@@ -32,8 +33,7 @@ start_link() ->
 
 %% Child :: {Id,StartFunc,Restart,Shutdown,Type,Modules}
 init([]) ->
-    {ok, { {one_for_all, 0, 1}, [?CHILD(app_ctrl_server, 5000, worker),
-                                 ?CHILD(app_ctrl_event_sup, 500, worker)]} }.
+    {ok, { {one_for_all, 0, 1}, [?CHILD(app_ctrl_server_proxy, 5000, worker)]} }.
 
 %%====================================================================
 %% Internal functions

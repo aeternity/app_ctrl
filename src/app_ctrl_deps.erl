@@ -1,12 +1,47 @@
 %%% -*- mode: erlang; erlang-indent-level: 4; indent-tabs-mode: nil -*-
 %%%-------------------------------------------------------------------
-%%% @copyright (C) 2018, Aeternity Anstalt
+%%% @copyright (C) 2018-21, Aeternity Anstalt
+%%% @author Ulf Wiger <ulf@wiger.net>
+%%% @hidden
 %%%-------------------------------------------------------------------
+
+%%% Dependency management
+%%% Note: The idea is to evolve `app_ctrl` into a cluster controller.
+%%% Some design decisions are driven by this, and may look out of place
+%%% as long as only local application control is supported.
+%%%
+%%% Such a thing is the wrapping of application identifiers as
+%%% `{app_name(), node()}` tuples. In some interactions with the local
+%%% application_controller, it is vital to know whether to report a
+%%% remote application as running: If an instance of the application in
+%%% question is supposed to be running locally, we must NOT report the
+%%% event, since it would cause the application_controller to automatically
+%%% stop the local instance. The assumption of the application_controller
+%%% is that a dist_ac-controlled application runs in one place only, but
+%%% `app_ctrl` allows for other configurations, such as multiple mated
+%%% pairs, load-sharing pools, etc.
+%%%
+%%% This module also builds a digraph of all detected app dependencies.
+%%% This is currently overkill, but the code is kept, as it may become
+%%% handy later on, perhaps partly in an introspection API, where app
+%%% dependencies can be conventiently explored.
+%%%
 -module(app_ctrl_deps).
 
 -export([dependencies/0,
-         dependencies/1]).
+         dependencies/1,
+         role_apps/0,
+         valid_mode/1,
+         apps_in_mode/1
+        ]).
 
+-export([get_dependencies_of_app/2,
+         get_app_dependencies/2]).
+
+%% -ifdef(TEST).
+%% -include_lib("eunit/include/eunit.hrl").
+%% -endif.
+-include_lib("kernel/include/logger.hrl").
 
 dependencies() ->
     CtrlApps = ctrl_apps(),
@@ -14,46 +49,68 @@ dependencies() ->
     CtrlApps1 = add_app_deps(app_deps(), CtrlApps),
     dependencies(CtrlApps1).
 
-dependencies(CtrlApps0) ->
+dependencies(CtrlApps) ->
     G = digraph:new(),
-    try
-        CtrlApps = ctrl_apps_(CtrlApps0),
-        add_vertices(CtrlApps, G),
-        add_edges(start_before, CtrlApps, G),
-        add_edges(start_after, CtrlApps, G),
-        check_for_cycles(G),
-        Deps = [{V, reachable_neighbours([V], G)}
-         || V <- vertices(G)],
-        annotate(add_final_deps(Deps, CtrlApps), G)
-    after
-        digraph:delete(G)
+    ?LOG_DEBUG("CtrlApps = ~p~n", [CtrlApps]),
+    add_vertices(CtrlApps, G),
+    add_edges(start_before, CtrlApps, G),
+    add_edges(start_after, CtrlApps, G),
+    check_for_cycles(G),
+    Deps = [{V, reachable_neighbours([V], G)}
+            || V <- vertices(G)],
+    #{ graph => G
+     , annotated =>  annotate(add_final_deps(Deps, CtrlApps), G) }.
+
+role_apps() ->
+    Roles = app_ctrl_config:roles(),
+    apps_of_roles(Roles).
+
+valid_mode(Mode) ->
+    lists:keymember(Mode, 1, app_ctrl_config:modes()).
+
+apps_in_mode(Mode) ->
+    Modes = app_ctrl_config:modes(),
+    ?LOG_DEBUG("Modes = ~p", [Modes]),
+    case lists:keyfind(Mode, 1, Modes) of
+        {_, Roles} ->
+            RolesEnv = app_ctrl_config:roles(),
+            RoleInfo = [RI || {R, _} = RI <- RolesEnv,
+                              lists:member(R, Roles)],
+            apps_of_roles(RoleInfo);
+        false ->
+            ?LOG_ERROR("Invalid app_ctrl mode: ~p", [Mode]),
+            error({unknown_mode, Mode})
     end.
 
+get_dependencies_of_app(Graph, App) when is_atom(App) ->
+    [A || {_,{A,_},_,_} <- [digraph:edge(Graph, E)
+                            || E <- digraph:in_edges(Graph, {App,node()})]].
+
+get_app_dependencies(Graph, App) when is_atom(App) ->
+    [A || {_,_,{A,_},_} <- [digraph:edge(Graph, E)
+                            || E <- digraph:out_edges(Graph, {App,node()})]].
+
+%% We want to figure out which apps to control. Basically these are
+%% all the apps mentioned in 'applications' and 'roles'.
 ctrl_apps() ->
-    ctrl_apps_(application:get_env(app_ctrl, applications, [])).
+    ctrl_apps_(app_ctrl_config:applications()).
 
 ctrl_apps_(L) ->
+    RoleApps = [{A, #{}} || A <- role_apps()],
     lists:map(
       fun({A, #{} = M}) ->
-              {app_vertex(A), normalize_vertices(check_for_reserved_keys(M))};
-          ({A, Ps}) ->
-              {app_vertex(A), normalize_vertices(
-                                check_for_reserved_keys(maps:from_list(Ps)))}
-      end, L).
+              {app_vertex(A), normalize_vertices(M)};
+          ({A, Ps}) when is_list(Ps) ->
+              {app_vertex(A), normalize_vertices(maps:from_list(Ps))}
+      end, RoleApps ++ L).
 
-check_for_reserved_keys(Map) when is_map(Map) ->
-    case maps:fold(fun(K,_,Acc) ->
-                           case lists:member(K, reserved_keys()) of
-                               true  -> [K|Acc];
-                               false -> Acc
-                           end
-                   end, [], Map) of
-        [] -> Map;
-        [_|_] = Reserved ->
-            error({reserved_attributes, Reserved})
-    end.
+apps_of_roles(Roles) ->
+    remove_duplicates(
+      lists:append(
+        [As1 || {_Role, As1} <- Roles])).
 
-reserved_keys() -> [deps, annotated].
+remove_duplicates(L) ->
+    lists:foldr(fun(H, T) -> [H|lists:delete(H, T)] end, [], L).
 
 normalize_vertices(M) ->
     normalize_vertices_(
@@ -131,11 +188,15 @@ union(A0, B0) ->
     B = lists:usort(B0),
     (A -- B) ++ (B -- A).
 
-
 app_deps() ->
     [{app_vertex(A),
       [app_vertex(D) || D <- ok(application:get_key(A, applications))]}
      || {A, _, _} <- application:loaded_applications()].
+
+ok({ok, Res}) ->
+    Res;
+ok(Other) ->
+    erlang:error({unexpected, Other}).
 
 add_vertices(L, G) ->
     lists:foreach(
@@ -157,7 +218,8 @@ app_vertex({A,N} = V) when is_atom(A), is_atom(N) ->
 
 add_edges(K, L, G) ->
     [[add_edge(K, G, app_vertex(B), A, {K, B})
-      || B <- maps:get(K, M, [])] || {A, M} <- L],
+      || B <- maps:get(K, M, [])]
+     || {A, M} <- L],
     ok.
 
 check_for_cycles(G) ->
@@ -211,11 +273,6 @@ try_load_apps(Apps) ->
             erlang:error({missing_applications, CannotLoad})
     end.
 
-ok({ok, Res}) ->
-    Res;
-ok(Other) ->
-    erlang:error({unexpected, Other}).
-
 vertices(G) ->
     digraph:vertices(G).
 
@@ -225,7 +282,7 @@ reachable_neighbours(Vs, G) ->
 add_vertex(G, V) ->
     digraph:add_vertex(G, V).
 
-add_edge(start_before, G, A, B, L) ->
+add_edge(start_before, G, A, B, L) when A =/= B ->
     digraph:add_edge(G, A, B, L);
-add_edge(start_after,  G, A, B, L) ->
+add_edge(start_after,  G, A, B, L) when A =/= B ->
     digraph:add_edge(G, B, A, L).

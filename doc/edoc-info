@@ -1,0 +1,3 @@
+%% encoding: UTF-8
+{application,app_ctrl}.
+{modules,[app_ctrl,app_ctrl_events]}.
