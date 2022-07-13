@@ -235,7 +235,7 @@ handle_info({timeout, TRef, {awaiting_stable, From}}, #st{pending_stable = Pend}
         {value, {From, _}, Pend1} ->
             case is_stable(St) of
                 true ->
-                    notify_pending({ok, St#st.mode}, St#st{stable = true});
+                    {noreply, notify_pending({ok, St#st.mode}, St#st{stable = true})};
                 {false, Outstanding} ->
                     gen_server:reply(From, {timeout, Outstanding}),
                     {noreply, St#st{pending_stable = Pend1}}
