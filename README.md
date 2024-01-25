@@ -231,3 +231,11 @@ actions are supported:
 ## Build
 
     $ rebar3 compile
+
+## Debug
+
+`app_ctrl` uses `logger` logging, and checks an application environment variable
+for detailed module-level filtering of logging output.
+
+By setting the `app_ctrl` variable `log_levels` to `[{Level, [Mod]}]`, specific
+modules can be made to output more or less debugging info.

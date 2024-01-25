@@ -34,7 +34,7 @@ update_server_pid(Pid) when is_pid(Pid) ->
       Config :: logger:handler_config(),
       Reason :: term().
 adding_handler(Config) ->
-    erlang:display(#{msg => "adding bootstrap handler"}),
+    set_log_levels(),
     ?LOG_DEBUG("adding_handler(~p)", [Config]),
     Pid = spawn_app_ctrl(),
     Config1 = Config#{ filters => []
@@ -80,3 +80,19 @@ spawn_app_ctrl() ->
     {ok, Pid} = app_ctrl_server:start(),
     ?LOG_DEBUG("Dac pid: ~p", [Pid]),
     Pid.
+
+set_log_levels() ->
+    Levels = application:get_env(app_ctrl, log_levels, []),
+    set_levels_(default_levels()),
+    set_levels_(Levels).
+
+set_levels_(Levels) ->
+    lists:foreach(
+      fun({Level, Modules}) ->
+              logger:set_module_level(Modules, Level)
+      end, Levels).
+
+default_levels() ->
+    [{info, [app_ctrl_ctrl, app_ctrl_deps, app_ctrl_server,
+             app_ctrl_config, app_ctrl_server_proxy, app_ctrl_bootstrap]}].
+    
